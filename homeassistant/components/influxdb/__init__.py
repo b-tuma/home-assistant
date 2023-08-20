@@ -20,8 +20,6 @@ import urllib3.exceptions
 import voluptuous as vol
 
 from homeassistant.const import (
-    CONF_DOMAIN,
-    CONF_ENTITY_ID,
     CONF_TIMEOUT,
     CONF_UNIT_OF_MEASUREMENT,
     CONF_URL,
@@ -58,6 +56,7 @@ from .const import (
     CONF_DEFAULT_MEASUREMENT,
     CONF_HOST,
     CONF_IGNORE_ATTRIBUTES,
+    CONF_INCLUDE_ATTRIBUTES,
     CONF_MEASUREMENT_ATTR,
     CONF_ORG,
     CONF_OVERRIDE_MEASUREMENT,
@@ -83,14 +82,11 @@ from .const import (
     INFLUX_CONF_FIELDS,
     INFLUX_CONF_MEASUREMENT,
     INFLUX_CONF_ORG,
-    INFLUX_CONF_STATE,
     INFLUX_CONF_TAGS,
     INFLUX_CONF_TIME,
     INFLUX_CONF_VALUE,
     QUERY_ERROR,
     QUEUE_BACKLOG_SECONDS,
-    RE_DECIMAL,
-    RE_DIGIT_TAIL,
     RESUMED_MESSAGE,
     RETRY_DELAY,
     RETRY_INTERVAL,
@@ -159,6 +155,7 @@ _CUSTOMIZE_ENTITY_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_OVERRIDE_MEASUREMENT): cv.string,
         vol.Optional(CONF_IGNORE_ATTRIBUTES): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(CONF_INCLUDE_ATTRIBUTES): vol.All(cv.ensure_list, [cv.string]),
     }
 )
 
@@ -175,6 +172,9 @@ _INFLUX_BASE_SCHEMA = INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA.extend(
             cv.ensure_list, [cv.string]
         ),
         vol.Optional(CONF_IGNORE_ATTRIBUTES, default=[]): vol.All(
+            cv.ensure_list, [cv.string]
+        ),
+        vol.Optional(CONF_INCLUDE_ATTRIBUTES, default=[]): vol.All(
             cv.ensure_list, [cv.string]
         ),
         vol.Optional(CONF_COMPONENT_CONFIG, default={}): vol.Schema(
@@ -210,6 +210,7 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
     measurement_attr: str = conf[CONF_MEASUREMENT_ATTR]
     override_measurement = conf.get(CONF_OVERRIDE_MEASUREMENT)
     global_ignore_attributes = set(conf[CONF_IGNORE_ATTRIBUTES])
+    global_include_attributes = set(conf[CONF_INCLUDE_ATTRIBUTES])
     component_config = EntityValues(
         conf[CONF_COMPONENT_CONFIG],
         conf[CONF_COMPONENT_CONFIG_DOMAIN],
@@ -227,16 +228,16 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
             return None
 
         try:
-            _include_state = _include_value = False
+            _include_value = False
 
             _state_as_value = float(state.state)
             _include_value = True
         except ValueError:
             try:
                 _state_as_value = float(state_helper.state_as_number(state))
-                _include_state = _include_value = True
+                _include_value = True
             except ValueError:
-                _include_state = True
+                pass
 
         include_uom = True
         include_dc = True
@@ -268,27 +269,27 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
 
         json: dict[str, Any] = {
             INFLUX_CONF_MEASUREMENT: measurement,
-            INFLUX_CONF_TAGS: {
-                CONF_DOMAIN: state.domain,
-                CONF_ENTITY_ID: state.object_id,
-            },
+            INFLUX_CONF_TAGS: {},
             INFLUX_CONF_TIME: event.time_fired,
             INFLUX_CONF_FIELDS: {},
         }
-        if _include_state:
-            json[INFLUX_CONF_FIELDS][INFLUX_CONF_STATE] = state.state
         if _include_value:
             json[INFLUX_CONF_FIELDS][INFLUX_CONF_VALUE] = _state_as_value
 
         ignore_attributes = set(entity_config.get(CONF_IGNORE_ATTRIBUTES, []))
         ignore_attributes.update(global_ignore_attributes)
+        include_attributes = set(entity_config.get(CONF_INCLUDE_ATTRIBUTES, []))
+        include_attributes.update(global_include_attributes)
         for key, value in state.attributes.items():
             if key in tags_attributes:
                 json[INFLUX_CONF_TAGS][key] = value
             elif (
                 (key != CONF_UNIT_OF_MEASUREMENT or include_uom)
                 and (key != "device_class" or include_dc)
-                and key not in ignore_attributes
+                and (
+                    key in include_attributes
+                    or (not include_attributes and key not in ignore_attributes)
+                )
             ):
                 # If the key is already in fields
                 if key in json[INFLUX_CONF_FIELDS]:
@@ -297,17 +298,8 @@ def _generate_event_to_json(conf: dict) -> Callable[[Event], dict[str, Any] | No
                 # For each value we try to cast it as float
                 # But if we cannot do it we store the value
                 # as string add "_str" postfix to the field key
-                try:
+                with suppress(ValueError, TypeError):
                     json[INFLUX_CONF_FIELDS][key] = float(value)
-                except (ValueError, TypeError):
-                    new_key = f"{key}_str"
-                    new_value = str(value)
-                    json[INFLUX_CONF_FIELDS][new_key] = new_value
-
-                    if RE_DIGIT_TAIL.match(new_value):
-                        json[INFLUX_CONF_FIELDS][key] = float(
-                            RE_DECIMAL.sub("", new_value)
-                        )
 
                 # Infinity and NaN are not valid floats in InfluxDB
                 with suppress(KeyError, TypeError):
