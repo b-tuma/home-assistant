@@ -191,3 +191,21 @@ random_effect:
           min: 1
           step: 1
           max: 600
+set_brightness:
+  description: Set dimmer brightness
+  target:
+    entity:
+      integration: tplink
+      domain: light
+  fields:
+    brightness:
+      description: Initial brightness
+      example: 80
+      default: 100
+      required: false
+      selector:
+        number:
+          min: 1
+          step: 1
+          max: 100
+          unit_of_measurement: "%"
