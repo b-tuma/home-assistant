@@ -35,6 +35,7 @@ from .entity import CoordinatedTPLinkEntity, async_refresh_after
 
 _LOGGER = logging.getLogger(__name__)
 
+SERVICE_SET_BRIGHTNESS = "set_brightness"
 SERVICE_RANDOM_EFFECT = "random_effect"
 SERVICE_SEQUENCE_EFFECT = "sequence_effect"
 
@@ -74,6 +75,12 @@ SEQUENCE_EFFECT_DICT: VolDictType = {
     ),
     vol.Optional("direction", default=4): vol.All(
         vol.Coerce(int), vol.Range(min=1, max=4)
+    ),
+}
+
+BRIGHTNESS_DICT: VolDictType = {
+    vol.Optional("brightness", default=100): vol.All(
+        vol.Coerce(int), vol.Range(min=0, max=100)
     ),
 }
 
@@ -161,12 +168,19 @@ async def async_setup_entry(
                 SEQUENCE_EFFECT_DICT,
                 "async_set_sequence_effect",
             )
-    elif Module.Light in device.modules:
+    elif light_module := device.modules.get(Module.Light):
         entities.append(
             TPLinkLightEntity(
                 device, parent_coordinator, light_module=device.modules[Module.Light]
             )
         )
+        if light_module.is_dimmable:
+            platform = entity_platform.async_get_current_platform()
+            platform.async_register_entity_service(
+                SERVICE_SET_BRIGHTNESS,
+                BRIGHTNESS_DICT,
+                "async_set_brightness",
+            )
     entities.extend(
         TPLinkLightEntity(
             child,
@@ -296,6 +310,12 @@ class TPLinkLightEntity(CoordinatedTPLinkEntity, LightEntity):
         await self._light_module.set_state(
             LightState(light_on=True, transition=transition)
         )
+
+    async def async_set_brightness(self, brightness: int | None) -> None:
+        """Set Brightness without necessarily turning on."""
+        if brightness is None:
+            brightness = 0
+        await self.device.set_brightness(brightness, transition=None)
 
     @async_refresh_after
     async def async_turn_on(self, **kwargs: Any) -> None:
